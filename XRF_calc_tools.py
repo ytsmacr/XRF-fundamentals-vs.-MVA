@@ -8,24 +8,185 @@ import os
 
 fp = "G:\\My Drive\\Darby Work\\XRF fundamentals vs. MVA\\"
 
+
+#-------------------------------------------------------------#
+#                   Instrument sensitivity                    #
+#-------------------------------------------------------------#   
+
+def calculate_sensitivity(filter):
+    
+    df = pd.read_csv(fp+'misc\\duplicate_spectra_list.csv')
+    folder = "Z:\\data_pXRF\\olympus_17_csv\\"
+    
+    print("Sensitivity calculations for filter", str(filter))
+    
+    sens_list = []
+    err_list = []
+    
+    # filter by filter type
+    temp_df = df[df['filter']==filter]
+    
+    # get list of samples
+    samples = temp_df['sample'].unique()
+    
+    # for each sample:
+    for sample in tqdm(samples):
+        
+        temp = temp_df[temp_df['sample']==sample]
+        
+        # get spectra names
+        spectra = temp.spectrum.unique()
+        if len(spectra) > 2:
+            err_list.append(sample)
+            continue
+
+        # first spectrum
+        spec1 = str(spectra[0])
+        temp1 = pd.read_csv(folder+spec1+'.csv', skiprows=20)
+        temp1 = temp1.set_index('Channel #')
+        temp1 = temp1.iloc[1:2048, :] # remove first and last rows b/c where stuff gets weird
+        temp1['Intensity'] = temp1['Intensity'].astype(int)
+        
+        # second spectrum
+        spec2 = str(spectra[1])
+        temp2 = pd.read_csv(folder+spec2+'.csv', skiprows=20)
+        temp2 = temp2.set_index('Channel #')
+        temp2 = temp2.iloc[1:2048, :]
+        temp2['Intensity'] = temp2['Intensity'].astype(int)
+        
+        # merge and calculate sensitivity
+        temp = pd.merge(temp1, temp2, left_index=True, right_index=True)
+        temp = temp.T
+        sens = temp.astype('float').std(axis=0).mean()
+        sens_list.append(sens)
+        
+    print(err_list, "had more than 2 duplicates and were excluded")
+    median_sens = round(median(sens_list),9)
+    print("Median sensitivity:", round(median_sens,1))
+    mean_sens = sum(sens_list) / len(sens_list)
+    print("Mean sensitivity:", round(mean_sens,1))
+    
+    # compare median to mean
+    med_c = 'red'
+    mean_c = 'blue'
+
+    plt.hist(sens_list, bins=20)
+    plt.ylabel("# Standards")
+    plt.xlabel("Sensitivity")
+    y_bot, y_top = plt.ylim()
+    plt.vlines(x=median_sens,
+               ymin = 0,
+               ymax = y_top,
+               colors=med_c,
+               label='median')
+    plt.vlines(x=mean_sens,
+               ymin = 0,
+               ymax = y_top,
+               colors=mean_c,
+               label='mean')
+    plt.title("Filter "+str(filter))
+    plt.legend()
+    plt.ylim((0,y_top))
+    plt.show()
+
+    sens_choice = input("Use median or mean sensitivity? ")
+    if sens_choice == 'median':
+        sensitivity = median_sens
+    elif sens_choice == 'mean':
+        sensitivity = mean_sens
+    else:
+        print("Error: input must be either median or mean.")
+    
+    return sensitivity
+
+#-------------------------------------------------------------#
+#   Calculate limits of blank, detection, and quantification  #
+#-------------------------------------------------------------#
+
+def calculate_lbdq(folder, file_list, o1_sens, o2_sens):
+    
+    coeffs = []
+    elem_list = []
+    filt_list = []
+    lob_list = []
+    lod_list = []
+    loq_list = []
+    
+    for filter_n in ['O1', 'O2']:
+
+        sensitivity = o1_sens if filter_n == 'O1' else o2_sens
+
+        # read models
+        if filter_n == 'O1': print("LBDQ calculations:")
+        
+        ftype = str(filter_n) + "_coeff"
+        for file in tqdm(file_list):
+            if ftype in file:       
+                path = folder + file
+                data = pd.read_csv(path, skiprows = [0])
+
+                # convert to dataframe
+                data = data.T
+
+                # adapt to different element naming b/w datasets
+                data.columns = data.iloc[0].map(lambda x: x.split()[0])
+                data = data.drop(data.index[0])
+                element = data.columns[0]
+                
+                # populate lists
+                elem_list.append(element)
+                filt_list.append(filter_n)
+
+                # calculate regression vectors
+                vector = pow(data, 2).sum().pow(.5)  #square root of sum of squares
+                
+                # calculate values
+                factors = {
+                    'LOB' : 1.645,
+                    'LOD' : 3.3,
+                    'LOQ' : 10
+                }
+
+                lob_list.append(factors['LOB'] * sensitivity * vector[0])
+                lod_list.append(factors['LOD'] * sensitivity * vector[0])
+                loq_list.append(factors['LOQ'] * sensitivity * vector[0])
+
+    # make dataframe
+    df = pd.DataFrame({
+        'element' : elem_list,
+        'filter' : filt_list,
+        'LOB' : lob_list,
+        'LOD' : lod_list,
+        'LOQ' : loq_list
+    })
+    
+    # change col formats
+    cols = df.columns.drop(['element', 'filter'])
+    df[cols] = df[cols].apply(pd.to_numeric)
+    
+    return df
+
 #-------------------------------------------------------------#
 #                         PLS Modelling                       #
 #-------------------------------------------------------------#
 
 # Get training metadata
 
-def get_train_meta(element, num_range):
+def get_train_meta(metadata, element, num_range, filter):
+
+    train_meta = o1_comps if filter == 'O1' else o2_comps
+    
     if num_range == '0-750':
-        train_meta = metadata[
-            metadata['Random Number'] <= 750
+        train_meta = train_meta[
+            train_meta['Random Number'] <= 750
         ][['pkey', element]]
 
     elif num_range == '250-1000':
-        train_meta = metadata[
-            metadata['Random Number'] >= 250
+        train_meta = train_meta[
+            train_meta['Random Number'] >= 250
         ][['pkey', element]]
 
-    else: train_meta = metadata[['pkey', element]]
+    else: train_meta = train_meta[['pkey', element]]
 
     # filter for non-outliers
     train_meta = train_meta[
@@ -213,164 +374,16 @@ def run_full_model(element, num_range, max_components, n_folds):
     test_model(element, num_range)
 
 
-#-------------------------------------------------------------#
-#                   Instrument sensitivity                    #
-#-------------------------------------------------------------#   
 
-def calculate_sensitivity(filter):
-    
-    df = pd.read_csv(fp+'misc\\duplicate_spectra_list.csv')
-    folder = "Z:\\data_pXRF\\olympus_17_csv\\"
-    
-    print("Sensitivity calculations for filter", str(filter))
-    
-    sens_list = []
-    err_list = []
-    
-    # filter by filter type
-    temp_df = df[df['filter']==filter]
-    
-    # get list of samples
-    samples = temp_df['sample'].unique()
-    
-    # for each sample:
-    for sample in tqdm(samples):
-        
-        temp = temp_df[temp_df['sample']==sample]
-        
-        # get spectra names
-        spectra = temp.spectrum.unique()
-        if len(spectra) > 2:
-            err_list.append(sample)
-            continue
 
-        # first spectrum
-        spec1 = str(spectra[0])
-        temp1 = pd.read_csv(folder+spec1+'.csv', skiprows=20)
-        temp1 = temp1.set_index('Channel #')
-        temp1 = temp1.iloc[1:2048, :] # remove first and last rows b/c where stuff gets weird
-        temp1['Intensity'] = temp1['Intensity'].astype(int)
-        
-        # second spectrum
-        spec2 = str(spectra[1])
-        temp2 = pd.read_csv(folder+spec2+'.csv', skiprows=20)
-        temp2 = temp2.set_index('Channel #')
-        temp2 = temp2.iloc[1:2048, :]
-        temp2['Intensity'] = temp2['Intensity'].astype(int)
-        
-        # merge and calculate sensitivity
-        temp = pd.merge(temp1, temp2, left_index=True, right_index=True)
-        temp = temp.T
-        sens = temp.astype('float').std(axis=0).mean()
-        sens_list.append(sens)
-        
-    print(err_list, "had more than 2 duplicates and were excluded")
-    median_sens = round(median(sens_list),9)
-    print("Median sensitivity:", round(median_sens,1))
-    mean_sens = sum(sens_list) / len(sens_list)
-    print("Mean sensitivity:", round(mean_sens,1))
-    
-    # compare median to mean
-    med_c = 'red'
-    mean_c = 'blue'
 
-    plt.hist(sens_list, bins=20)
-    plt.ylabel("# Standards")
-    plt.xlabel("Sensitivity")
-    y_bot, y_top = plt.ylim()
-    plt.vlines(x=median_sens,
-               ymin = 0,
-               ymax = y_top,
-               colors=med_c,
-               label='median')
-    plt.vlines(x=mean_sens,
-               ymin = 0,
-               ymax = y_top,
-               colors=mean_c,
-               label='mean')
-    plt.title("Filter "+str(filter))
-    plt.legend()
-    plt.ylim((0,y_top))
-    plt.show()
 
-    sens_choice = input("Use median or mean sensitivity? ")
-    if sens_choice == 'median':
-        sensitivity = median_sens
-    elif sens_choice == 'mean':
-        sensitivity = mean_sens
-    else:
-        print("Error: input must be either median or mean.")
-    
-    return sensitivity
+
 
 #-------------------------------------------------------------#
-#   Calculate limits of blank, detection, and quantification  #
-#-------------------------------------------------------------#
 
-def calculate_lbdq(folder, file_list, o1_sens, o2_sens):
-    
-    coeffs = []
-    elem_list = []
-    filt_list = []
-    lob_list = []
-    lod_list = []
-    loq_list = []
-    
-    for filter_n in ['O1', 'O2']:
 
-        sensitivity = o1_sens if filter_n == 'O1' else o2_sens
 
-        # read models
-        if filter_n == 'O1': print("LBDQ calculations:")
-        
-        ftype = str(filter_n) + "_coeff"
-        for file in tqdm(file_list):
-            if ftype in file:       
-                path = folder + file
-                data = pd.read_csv(path, skiprows = [0])
-
-                # convert to dataframe
-                data = data.T
-
-                # adapt to different element naming b/w datasets
-                data.columns = data.iloc[0].map(lambda x: x.split()[0])
-                data = data.drop(data.index[0])
-                element = data.columns[0]
-                
-                # populate lists
-                elem_list.append(element)
-                filt_list.append(filter_n)
-
-                # calculate regression vectors
-                vector = pow(data, 2).sum().pow(.5)  #square root of sum of squares
-                
-                # calculate values
-                factors = {
-                    'LOB' : 1.645,
-                    'LOD' : 3.3,
-                    'LOQ' : 10
-                }
-
-                lob_list.append(factors['LOB'] * sensitivity * vector[0])
-                lod_list.append(factors['LOD'] * sensitivity * vector[0])
-                loq_list.append(factors['LOQ'] * sensitivity * vector[0])
-
-    # make dataframe
-    df = pd.DataFrame({
-        'element' : elem_list,
-        'filter' : filt_list,
-        'LOB' : lob_list,
-        'LOD' : lod_list,
-        'LOQ' : loq_list
-    })
-    
-    # change col formats
-    cols = df.columns.drop(['element', 'filter'])
-    df[cols] = df[cols].apply(pd.to_numeric)
-    
-    return df
-
-#-------------------------------------------------------------#
 
 # Calculate test errors
 
