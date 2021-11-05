@@ -5,9 +5,20 @@ import matplotlib as mpl
 from matplotlib import pyplot as plt
 from statistics import median
 import os
+import numpy as np
+from sklearn.cross_decomposition import PLSRegression
+from sklearn.metrics import mean_squared_error
+from math import sqrt
+from sklearn.model_selection import cross_val_score
+from datetime import date
+import pickle
 
 fp = "G:\\My Drive\\Darby Work\\XRF fundamentals vs. MVA\\"
 
+# outlier limits (global variable)
+limits_path = "Z:\\Millennium Set\\near_zero&outliers_summary_091021.xlsx"
+limits = pd.read_excel(limits_path)
+limits = pd.Series(limits['Outlier limit'].values, index=limits['Element']).to_dict()
 
 #-------------------------------------------------------------#
 #                   Instrument sensitivity                    #
@@ -103,105 +114,58 @@ def calculate_sensitivity(filter):
 #   Calculate limits of blank, detection, and quantification  #
 #-------------------------------------------------------------#
 
-def calculate_lbdq(folder, file_list, o1_sens, o2_sens):
-    
-    coeffs = []
-    elem_list = []
-    filt_list = []
-    lob_list = []
-    lod_list = []
-    loq_list = []
-    
-    for filter_n in ['O1', 'O2']:
+def calculate_lbdq(element, num_range, sensitivity):
 
-        sensitivity = o1_sens if filter_n == 'O1' else o2_sens
+    fp = "G:\\My Drive\\Darby Work\\XRF fundamentals vs. MVA\\python_models\\PLS\\"
 
-        # read models
-        if filter_n == 'O1': print("LBDQ calculations:")
+    coeff = pd.read_csv(fp+num_range+"\\"+element+"_coeffs.csv")
+
+    # calculate regression vectors
+    vector = pow(coeff, 2).sum().pow(.5)  #square root of sum of squares
+                                                
+    # calculate values
+    factors = {
+    'LOB' : 1.645,
+    'LOD' : 3.3,
+    'LOQ' : 10
+    }
+
+    lob = factors['LOB'] * sensitivity * vector[0]
+    lod = factors['LOD'] * sensitivity * vector[0]
+    loq = factors['LOQ'] * sensitivity * vector[0]
         
-        ftype = str(filter_n) + "_coeff"
-        for file in tqdm(file_list):
-            if ftype in file:       
-                path = folder + file
-                data = pd.read_csv(path, skiprows = [0])
-
-                # convert to dataframe
-                data = data.T
-
-                # adapt to different element naming b/w datasets
-                data.columns = data.iloc[0].map(lambda x: x.split()[0])
-                data = data.drop(data.index[0])
-                element = data.columns[0]
-                
-                # populate lists
-                elem_list.append(element)
-                filt_list.append(filter_n)
-
-                # calculate regression vectors
-                vector = pow(data, 2).sum().pow(.5)  #square root of sum of squares
-                
-                # calculate values
-                factors = {
-                    'LOB' : 1.645,
-                    'LOD' : 3.3,
-                    'LOQ' : 10
-                }
-
-                lob_list.append(factors['LOB'] * sensitivity * vector[0])
-                lod_list.append(factors['LOD'] * sensitivity * vector[0])
-                loq_list.append(factors['LOQ'] * sensitivity * vector[0])
-
-    # make dataframe
-    df = pd.DataFrame({
-        'element' : elem_list,
-        'filter' : filt_list,
-        'LOB' : lob_list,
-        'LOD' : lod_list,
-        'LOQ' : loq_list
-    })
-    
-    # change col formats
-    cols = df.columns.drop(['element', 'filter'])
-    df[cols] = df[cols].apply(pd.to_numeric)
-    
-    return df
+    return lob, lod, loq
 
 #-------------------------------------------------------------#
 #                         PLS Modelling                       #
 #-------------------------------------------------------------#
 
-# Get training metadata
+# Make training model
 
-def get_train_meta(metadata, element, num_range, filter):
+def train_PLS_model(element, f, metadata, spectra, max_components, n_folds, num_range):
 
-    train_meta = o1_comps if filter == 'O1' else o2_comps
-    
+    ep = "G:\\My Drive\\Darby Work\\XRF fundamentals vs. MVA\\python_models\\PLS\\"
+
+    # get training data
     if num_range == '0-750':
-        train_meta = train_meta[
-            train_meta['Random Number'] <= 750
+        train_meta = metadata[
+            metadata['Random'] <= 750
         ][['pkey', element]]
 
     elif num_range == '250-1000':
-        train_meta = train_meta[
-            train_meta['Random Number'] >= 250
+        train_meta = metadata[
+            metadata['Random'] >= 250
         ][['pkey', element]]
 
-    else: train_meta = train_meta[['pkey', element]]
+    else:
+        train_meta = metadata[['pkey', element]]
 
     # filter for non-outliers
     train_meta = train_meta[
         train_meta[element] <= limits[element]
     ].reset_index(drop=True)
 
-    return train_meta
-
-#-------------------------------------------------------------#
-
-# Make training model
-
-def train_PLS_model(element, train_spectra, train_meta, max_components, n_folds):
-
-    ep = fp+"python_models\\PLS\\"
+    train_spectra = spectra[train_meta.pkey]
     
     # format training spectra for model
     spec_list = []
@@ -212,16 +176,14 @@ def train_PLS_model(element, train_spectra, train_meta, max_components, n_folds)
 
     # exit if not enough standards
     if len(spec_list) < 2:
-        n_train.append('NaN')
-        train_r2s.append('NaN')
-        rmsecs.append('NaN')
-        return
+        print("Error: Fewer than two training spectra.")
+        return ['NA' * 5]
     
     X_train = np.array(spec_list)
     
     # select relevant metadata
     y_train = train_meta[element].values
-    n_train.append(len(y_train))
+    n1 = len(y_train)
 
     # cross-validation
     cv_dict = {}
@@ -238,15 +200,13 @@ def train_PLS_model(element, train_spectra, train_meta, max_components, n_folds)
     
     # select parameters of model with lowest rmsecv
     best_rmsecv = min(list(cv_dict.keys()))
-    rmsecvs.append(best_rmsecv)
     best_component = cv_dict[best_rmsecv]
-    components.append(best_component)
     best_pls = PLSRegression(n_components = best_component, scale=False)
     
     # train model
     best_pls.fit(X_train,y_train)
     # export model
-    filename = ep+num_range+"\\"+element+"_model.asc"
+    filename = ep+num_range+"\\"+element+"_"+f+"_model.asc"
     pickle.dump(best_pls, open(filename, 'wb'), protocol=0)
     
     # model coefficients
@@ -257,17 +217,13 @@ def train_PLS_model(element, train_spectra, train_meta, max_components, n_folds)
     
     # r-squared
     r2 = best_pls.score(X_train,y_train)
-    train_r2s.append(r2)
     # predicted training values and RMSE-C
     train_pred = best_pls.predict(X_train)
     train_pred_true = pd.DataFrame({
         'pred' : train_pred.flatten().tolist(),
         'actual' : y_train.flatten().tolist()
     })
-    # remove predictions below LOQ
-    train_pred_true = train_pred_true[
-        train_pred_true['pred'] >= loq_key[element]
-    ]
+
     # remove predictions above 100 wt%
     if len(element) > 2:
         train_pred_true = train_pred_true[
@@ -275,51 +231,47 @@ def train_PLS_model(element, train_spectra, train_meta, max_components, n_folds)
         ]
     
     # export pred/true
-    path = ep+num_range+'\\'+element+'_train_predictions.csv'
+    path = ep+num_range+'\\'+element+"_"+f+'_train_predictions.csv'
     train_pred_true.to_csv(path, index=False)
     
     # get RMSE-C
     rmsec = round(sqrt(mean_squared_error(train_pred_true.pred, train_pred_true.actual)),2)
-    rmsecs.append(rmsec)
+
+    return best_rmsecv, best_component, r2, rmsec, n1
 
 #-------------------------------------------------------------#
 
 # Get test data and run predictions
 
-def test_model(element, num_range):
+def test_model(element, f, loq, num_range, metadata, spectra):
     
     # select test samples
-    if num_range == 'all':
-        rmseps.append('NaN')
-        n_test.append('NaN')
-        test_r2s.append('NaN')
-        return
-
-    elif num_range == '0-750':
+    if num_range == '0-750':
         test_meta = metadata[
-            metadata['Random Number'] > 750
+            metadata['Random'] > 750
         ][['pkey', element]]    
 
     elif num_range == '250-1000':
         test_meta = metadata[
-            metadata['Random Number'] < 250
+            metadata['Random'] < 250
         ][['pkey', element]]  
 
     # filter for non-outliers
     test_meta = test_meta[
         test_meta[element] <= limits[element]
     ].reset_index(drop=True)
+
+    test_spectra = spectra[test_meta.pkey]
     
     # exit if not enough standards
     if len(test_meta) < 2:
-        n_test.append('NaN')
-        test_r2s.append('NaN')
-        rmseps.append('NaN')
-        return
+        print("Error: <2 test standards for", element)
+        n2 = 'NA'
+        test_r2 = 'NA'
+        rmsep = 'NA'
+        return n2, test_r2, rmsep
     
-    n_test.append(len(test_meta))
-
-    test_spectra = spectra[test_meta.pkey]
+    n2 = len(test_meta)
 
     test_spec_list = []
 
@@ -330,7 +282,8 @@ def test_model(element, num_range):
     X_test = np.array(test_spec_list)
 
     # import model
-    filename = ep+num_range+"\\"+element+"_model.asc"
+    fp = "G:\\My Drive\\Darby Work\\XRF fundamentals vs. MVA\\python_models\\PLS\\"
+    filename = fp+num_range+"\\"+element+"_"+f+"_model.asc"
     model = pickle.load(open(filename, 'rb'))
     # run predictions
     test_pred = model.predict(X_test)
@@ -341,7 +294,7 @@ def test_model(element, num_range):
     })
     # remove predictions below LOQ
     test_pred_true = test_pred_true[
-        test_pred_true['pred'] >= loq_key[element]
+        test_pred_true['pred'] >= loq
     ]
     # remove predictions above 100 wt%
     if len(element) > 2:
@@ -349,146 +302,13 @@ def test_model(element, num_range):
             test_pred_true['pred'] <= 100
         ]
     # export pred/true
-    path = ep+num_range+'\\'+element+'_test_predictions.csv'
+    path = fp+num_range+'\\'+element+"_"+f+'_test_predictions.csv'
     test_pred_true.to_csv(path, index=False)
     # get RMSE-P
     rmsep = round(sqrt(mean_squared_error(test_pred_true.pred, test_pred_true.actual)),2)
-    rmseps.append(rmsep)
     # get R2
     r2 = r2_score(test_pred_true.pred,test_pred_true.actual)
-    test_r2s.append(r2)
 
-#-------------------------------------------------------------#
-
-# Run model functions
-
-def run_full_model(element, num_range, max_components, n_folds):
-    elems.append(element)
-    ranges.append(num_range)
-    # get relevant training data
-    train_meta = get_train_meta(element, num_range)
-    train_spectra = spectra[train_meta.pkey]
-    # train model
-    train_model(element, train_spectra, train_meta, max_components, n_folds)
-    # optionally test model
-    test_model(element, num_range)
-
-
-
-
-
-
-
-
-#-------------------------------------------------------------#
-
-
-
-
-# Calculate test errors
-
-def calculate_rmsep(comps, folder, file_list, lbdq):
-    
-    elem_list = []
-    filt_list = []
-    avg_list = []
-    rmsep_list = []
-    r2_list = []
-    
-    for filter_n in ['O1', 'O2']:
-
-        if filter_n == 'O1': print("RMSEP:")
-    
-        ftype = filter_n + "_test"
-
-        for file in tqdm(file_list):
-            if ftype in file:       
-                path = (folder + file)
-                data = pd.read_csv(path)
-
-                # get element
-                element = data.columns[1].split()[0]
-                elem_list.append(element)
-                filt_list.append(filter_n)
-
-                # format columns
-                data.columns = ['pkey', 'Actual', 'Pred']
-                data = data.drop([0])
-                data.Pred = data.Pred.astype(float)  
-
-                # remove predictions above 100 for majors
-                if len(element) > 2:
-                    data = data[data.Pred < 100]
-
-                # remove all predictions below 0
-                data = data[data.Pred > 0].reset_index(drop=True).sort_index(axis=1)
-
-                # order columns
-                data = data[['pkey', 'Actual', 'Pred']].drop_duplicates(subset = 'pkey').sort_values(by='pkey').reset_index(drop=True)
-
-                # subselect relevant reference values
-                ref = lbdq[(lbdq['element'].astype(str) == element) &
-                           (lbdq['filter'].astype(str) == filter_n)].reset_index(drop=True)
-
-                # add in Actual concentrations
-                temp_comps = comps[comps.pkey.isin(data.pkey)].reset_index(drop=True)                   
-                data['Actual'] = temp_comps[temp_comps['pkey'] == data['pkey']][element]
-
-                # remove NaN Actual values....which idk why they'd be there
-                data = data.dropna()
-
-                # calculate values
-                loq = ref['LOQ'].iloc[0]
-                # select just predictions above the LOQ
-                data = data[data.Pred > loq].reset_index(drop=True)
-                # get average concentration
-                avg = data['Actual'].mean()
-                avg_list.append(avg)
-                # get R2
-                if len(data) > 1:
-                    r2 = r2_score(data.Actual, data.Pred)
-                    r2_list.append(r2)
-                else: r2_list.append('Not enough test samples above LOQ')
-                # get RMSE-P
-                data['sqerror'] = (data.Actual - data.Pred).pow(2)
-                rmsep = data['sqerror'].mean() ** 0.5
-                rmsep_list.append(rmsep)
-
-    
-    df = pd.DataFrame({
-        "element" : elem_list,
-        "filter" : filt_list,
-        "avg_comp" : avg_list,
-        "RMSEP" : rmsep_list,
-        "R2" : r2_list,
-    })
-    
-    
-    return df
-
-#-------------------------------------------------------------#
-
-# Accumulate results
-
-def get_results(comps, regression, n_range, o1_sens, o2_sens):
-    
-    print('Calculating for', regression, n_range)
-
-    folder = fp+"\\models\\"+regression+"\\"+n_range+"\\"
-    file_list = os.listdir(folder)
-    if len(file_list) == 0:
-        print("\tNo files")
-        return
-
-    # calculate lbdq
-    lbdq = calculate_lbdq(folder, file_list, o1_sens, o2_sens)
-    # calculate rmsep with lbdq results
-    rmsep = calculate_rmsep(comps, folder, file_list, lbdq)
-    # merge results
-    df = pd.merge(lbdq, rmsep, how='outer', on=['element', 'filter'])
-    df.insert(loc=2, column='num_range', value=n_range)
-    df.insert(loc=2, column='regression', value=regression)
-    # return full results
-    return df 
+    return n2, r2, rmsep
 
 #-------------------------------------------------------------#
