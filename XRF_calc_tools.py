@@ -301,6 +301,15 @@ def test_model(element, f, loq, num_range, metadata, spectra):
         test_pred_true = test_pred_true[
             test_pred_true['pred'] <= 100
         ]
+
+    # re-check number of samples
+    if len(test_pred_true) < 2:
+        print("Error: <2 test standards for", element)
+        n2 = 'NA'
+        test_r2 = 'NA'
+        rmsep = 'NA'
+        return n2, test_r2, rmsep
+    
     # export pred/true
     path = fp+num_range+'\\'+element+"_"+f+'_test_predictions.csv'
     test_pred_true.to_csv(path, index=False)
