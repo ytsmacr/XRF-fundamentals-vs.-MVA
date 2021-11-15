@@ -235,7 +235,7 @@ def train_PLS_model(element, f, metadata, spectra, max_components, n_folds, num_
     train_pred_true.to_csv(path, index=False)
     
     # get RMSE-C
-    rmsec = round(sqrt(mean_squared_error(train_pred_true.pred, train_pred_true.actual)),2)
+    rmsec = sqrt(mean_squared_error(train_pred_true.pred, train_pred_true.actual))
 
     return best_rmsecv, best_component, r2, rmsec, n1
 
@@ -314,7 +314,7 @@ def test_model(element, f, loq, num_range, metadata, spectra):
     path = fp+num_range+'\\'+element+"_"+f+'_test_predictions.csv'
     test_pred_true.to_csv(path, index=False)
     # get RMSE-P
-    rmsep = round(sqrt(mean_squared_error(test_pred_true.pred, test_pred_true.actual)),2)
+    rmsep = sqrt(mean_squared_error(test_pred_true.pred, test_pred_true.actual))
     # get R2
     r2 = r2_score(test_pred_true.pred,test_pred_true.actual)
 
